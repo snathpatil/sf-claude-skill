@@ -113,13 +113,13 @@ The agent finds modified files, extracts SOQL queries from them, runs REST API e
 
 ### Deploying
 
-> "Deploy the GleanService class"
+> "Deploy the AccountService class"
 
-The agent runs: `sf project deploy start --metadata ApexClass:GleanService`
+The agent runs: `sf project deploy start --metadata ApexClass:AccountService`
 
-> "Deploy the enrollmentTimelineModal component"
+> "Deploy the accountHouseholdModal component"
 
-The agent runs: `sf project deploy start --source-dir force-app/main/default/lwc/enrollmentTimelineModal`
+The agent runs: `sf project deploy start --source-dir force-app/main/default/lwc/accountHouseholdModal`
 
 > "Deploy everything and run tests"
 
@@ -141,7 +141,7 @@ The agent finds all modified classes, runs their associated tests, and reports p
 
 ### Code Review
 
-> "Review GleanService.cls for best practices"
+> "Review AccountService.cls for best practices"
 
 The agent reads the file and checks for: SOQL/DML in loops, missing sharing keywords, CRUD/FLS enforcement, hardcoded IDs, test coverage, and more.
 
