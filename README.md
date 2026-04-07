@@ -190,4 +190,4 @@ You can tailor the skill to your team's conventions:
 
 ## License
 
-MIT
+CC0 1.0 Universal
