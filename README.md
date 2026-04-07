@@ -6,12 +6,12 @@ An agent skill that turns Cursor into an autonomous Salesforce development envir
 
 When active, the Cursor agent will automatically:
 
-- **Deploy code** using `sf project deploy start` when you say "deploy this"
-- **Run Apex tests** via `sf apex run test` and interpret results
-- **Run LWC Jest tests** via `npm test`
-- **Validate deployments** with a preview → validate → deploy → report workflow
-- **Review code** for governor limit violations, missing CRUD/FLS, hardcoded IDs, SOQL injection, and more
-- **Check SOQL performance** by calling the REST API explain endpoint (no Developer Console needed)
+- **Discover what changed** — finds recently modified classes, triggers, LWC, and Aura components by scanning file timestamps or git diffs (no need to tell it which files)
+- **Review modified code** for governor limit violations, missing CRUD/FLS, hardcoded IDs, SOQL injection, and more
+- **Extract SOQL from changed files** and run explain plans via the REST API to check query selectivity (no Developer Console needed)
+- **Write tests as it goes** — scans the project for existing test data factories, bypass patterns, and mock conventions, then generates tests that follow the same style
+- **Run tests after every change** — finds the corresponding test class, runs it, and fixes failures before moving on
+- **Deploy code** using `sf project deploy start` with a full preview → validate → deploy → report workflow
 - **Enforce SLDS compliance** in all LWC/Aura components
 - **Generate meta.xml files** with the correct API version from `sfdx-project.json`
 - **Fix issues** found during validation and re-deploy automatically
@@ -22,7 +22,7 @@ When active, the Cursor agent will automatically:
 |------|----------------|
 | **Apex** | Bulkification, governor limits, one-trigger-per-object, handler pattern, Service/Domain/Selector layers, async patterns (Queueable/Batch/Future/Schedulable), error handling, code quality |
 | **Apex Security** | `with sharing` by default, CRUD/FLS via `WITH USER_MODE`, SOQL injection prevention, no hardcoded credentials |
-| **Apex Testing** | 85%+ coverage, `@TestSetup`, `Test.startTest/stopTest`, bulk testing, `System.runAs`, callout mocking |
+| **Apex Testing** | Auto-generates tests by scanning existing factories/patterns, 85%+ coverage, `@TestSetup`, bulk testing, `System.runAs`, callout mocking, continuous run-after-every-change loop |
 | **LWC** | SLDS-first UI (base components → blueprints → styling hooks), `lwc:if` (not deprecated `if:true`), reactive `@wire`, lifecycle cleanup, debounce, accessibility |
 | **LWC Testing** | Jest setup, `__tests__/` structure, DOM cleanup, async re-render awaits, Apex mocking |
 | **Aura** | Maintenance-mode guidance, `$A.enqueueAction` pattern, naming pitfalls, migration to LWC |
@@ -101,6 +101,16 @@ sf force lightning lwc test setup
 
 Once the skill is active, use natural language in Cursor:
 
+### Review recently modified files
+
+> "Review recent changes"
+
+The agent finds all recently modified `.cls`, `.trigger`, `.js`, `.html` files itself, reads each one, checks for best practice violations, extracts SOQL and runs explain plans, and reports findings.
+
+> "Check query plans for anything I changed today"
+
+The agent finds modified files, extracts SOQL queries from them, runs REST API explain plans on each, and reports cost/selectivity.
+
 ### Deploying
 
 > "Deploy the GleanService class"
@@ -115,27 +125,25 @@ The agent runs: `sf project deploy start --source-dir force-app/main/default/lwc
 
 The agent runs the full preview → validate → deploy → report workflow automatically.
 
-### Testing
+### Testing and test generation
 
-> "Run all Apex tests"
+> "Write tests for MyNewService"
 
-The agent runs: `sf apex run test --test-level RunLocalTests --result-format human --wait 10`
+The agent first scans the project for existing test data factories, bypass patterns, and mock conventions. Then it generates a test class following those exact patterns — reusing the same factory methods, same bypass custom settings, same mock style.
 
-> "Run Jest tests for the timeline component"
+> "Run tests for my recent changes"
 
-The agent runs: `npm test -- --testPathPattern=enrollmentTimelineModal`
+The agent discovers which files changed, finds their test classes, and runs them. If a test class is missing, it creates one.
+
+> "Make sure I haven't broken anything"
+
+The agent finds all modified classes, runs their associated tests, and reports pass/fail with details.
 
 ### Code Review
 
 > "Review GleanService.cls for best practices"
 
 The agent reads the file and checks for: SOQL/DML in loops, missing sharing keywords, CRUD/FLS enforcement, hardcoded IDs, test coverage, and more.
-
-### Query Performance
-
-> "Is this SOQL query selective?"
-
-The agent runs the REST API explain endpoint and reports cost, operation type, and cardinality.
 
 ### Diagnostics
 

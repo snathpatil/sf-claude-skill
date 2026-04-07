@@ -131,7 +131,46 @@ If any step fails, read the error output, attempt to fix the issue, and retry.
 
 ---
 
-## 2. Automated Code Review
+## 2. Discovering Recently Modified Files
+
+When the user says "review recent changes", "check modified files", or "what changed" — do NOT
+ask which files. Discover them yourself using these commands:
+
+### Find recently modified Apex classes and triggers
+
+```bash
+# Files modified in the last N days (adjust -mtime as needed)
+find force-app/main/default/classes -name "*.cls" -mtime -1 | sort
+find force-app/main/default/triggers -name "*.trigger" -mtime -1 | sort
+
+# Files modified today
+find force-app/main/default -name "*.cls" -o -name "*.trigger" -o -name "*.js" -o -name "*.html" -o -name "*.css" | xargs ls -lt 2>/dev/null | head -20
+
+# If it's a git repo, use git for precise diffs
+git diff --name-only HEAD~5 -- force-app/
+git diff --name-only --cached -- force-app/
+git status --short -- force-app/
+```
+
+### Find recently modified LWC and Aura components
+
+```bash
+find force-app/main/default/lwc -name "*.js" -o -name "*.html" -o -name "*.css" | xargs ls -lt 2>/dev/null | head -20
+find force-app/main/default/aura -name "*.cmp" -o -name "*.js" | xargs ls -lt 2>/dev/null | head -20
+```
+
+### Workflow when user says "review recent changes"
+
+1. Run the discovery commands above to get a list of modified files
+2. Read each modified file
+3. Run the Automated Code Review checklist (section 3) against each file
+4. For each modified file containing SOQL, extract and verify query plans (section 4)
+5. For each modified Apex class, find/generate tests and run them (section 5)
+6. Report findings back to the user
+
+---
+
+## 3. Automated Code Review
 
 When reviewing Apex/LWC code, **check these automatically by reading the source files**:
 
@@ -165,23 +204,46 @@ sf apex run test --class-names <RelatedTestClass> --result-format human --wait 1
 
 ---
 
-## 3. SOQL Performance Verification
+## 4. Auto-Detect and Verify SOQL from Modified Files
 
-**Do not tell the user to open Developer Console.** Instead, check query performance
-by running the REST API explain endpoint yourself:
+When the user says "check query plans", "check SOQL performance", or "review queries in
+recent changes" — do NOT ask which queries. Extract them yourself from modified files.
+
+### Step-by-step (execute all of this autonomously)
+
+1. **Find modified files** (use section 2 commands)
+2. **Extract SOQL from those files** — search for patterns like `[SELECT`, `Database.query(`, `Database.getQueryLocator(`
 
 ```bash
-# Get query explain plan via sf CLI
+# Find all SOQL in recently modified Apex files
+rg -n "\[SELECT|Database\.query\(|Database\.getQueryLocator\(" force-app/main/default/classes/MyChangedClass.cls
+```
+
+3. **For each extracted query**, URL-encode it and run the explain plan:
+
+```bash
+# Read the API version from sfdx-project.json first
+# Then call the explain endpoint for each query found
 sf api request rest "/services/data/v64.0/query/?explain=SELECT+Id,Name+FROM+Account+WHERE+Industry='Technology'" --method GET
 ```
 
-Parse the JSON response and check:
-- `leadingOperationType` — should be `Index`, not `TableScan`
-- `cost` — should be `< 1.0` for selective queries
-- `cardinality` — estimated records the operation touches
+4. **Parse the JSON response** and check:
+   - `leadingOperationType` — must be `Index`, not `TableScan`
+   - `cost` — must be `< 1.0` for selective queries
+   - `cardinality` — estimated records touched (lower is better)
+   - `sObjectCardinality` — total records in the object (context)
 
-If the query is non-selective (cost >= 1.0 or TableScan), suggest index-friendly
-WHERE clause changes. See [soql-sosl-best-practices.md](soql-sosl-best-practices.md) for details.
+5. **Report results** — for each query, report: the query text, the cost, the operation type,
+   and whether it is selective. If any query is non-selective (cost >= 1.0 or TableScan),
+   suggest specific WHERE clause changes using indexed fields.
+
+### Which queries to skip
+
+- Queries inside `@isTest` classes (test-only queries are not production-critical)
+- Queries already using `Id` or `Id IN :collection` (inherently selective)
+- Queries with `LIMIT 1` (bounded)
+
+See [soql-sosl-best-practices.md](soql-sosl-best-practices.md) for full selectivity rules.
 
 ---
 
@@ -213,159 +275,160 @@ For the full reference, see [apex-best-practices.md](apex-best-practices.md).
 
 ---
 
-## 5. LWC Best Practices (summary)
+## 5. Continuous Test Generation & Regression Detection
 
-For the full reference, see [lwc-best-practices.md](lwc-best-practices.md).
+**Write tests as you go.** After every code change, find or create the corresponding test
+class, run it, and fix failures — all autonomously. Never leave a class without test coverage.
 
-### Architecture
+### Step 1: Discover existing test patterns in the project
 
-- Prefer LWC over Aura for all new development
-- Use `@wire` for reactive reads; imperative Apex only for mutations
-- Small, composable, single-responsibility components
-- Use Lightning Data Service (`lightning-record-form`, `getRecord`) before custom Apex
-
-### SLDS compliance (mandatory)
-
-1. **Lightning base components first** — `lightning-button`, `lightning-datatable`, `lightning-card`, etc.
-2. **SLDS blueprint classes** — `slds-grid`, `slds-col`, `slds-card`, `slds-text-heading_medium`
-3. **SLDS styling hooks** (CSS custom properties) — never override SLDS classes directly
-4. Never style based on internal rendered markup of base components
-
-### HTML template rules
-
-- Use `lwc:if` / `lwc:elseif` / `lwc:else` — **not** deprecated `if:true` / `if:false`
-- `for:each` requires a `key` attribute with unique value (e.g., `Id`)
-- Avoid complex expressions in templates — use JS getters
-
-### JavaScript rules
-
-- `async/await` for imperative Apex
-- Debounce search/filter inputs
-- Clean up listeners/intervals in `disconnectedCallback()`
-- `CustomEvent` for child-to-parent; Lightning Message Service for cross-component
-
-### Testing (Jest) — run these yourself
+Before writing any test, **learn how this project writes tests** by scanning the codebase:
 
 ```bash
-# Setup (first time only)
-sf force lightning lwc test setup
+# Find all test classes
+rg -l "@isTest|@IsTest" force-app/main/default/classes/ --glob "*.cls"
 
-# Run all LWC tests
-npm test
+# Find test data factories / utility classes
+rg -l "TestDataFactory|TestData|TestUtility|TestHelper|TestSetup" force-app/main/default/classes/ --glob "*.cls"
 
-# Run with coverage
-npm test -- --coverage
+# Find the most common test setup patterns (bypass triggers, custom settings, etc.)
+rg -n "@TestSetup|testSetup|setup\(\)" force-app/main/default/classes/ --glob "*Test*.cls" -l
+
+# Find bypass/isolation patterns used in tests
+rg -n "bypassTrigger|BypassRulesTriggers|TriggerSettingsUtil|ByPass_Validation" force-app/main/default/classes/ --glob "*Test*.cls"
+
+# Find HTTP mock patterns
+rg -n "HttpCalloutMock|Test\.setMock|MultiStaticResourceCalloutMock" force-app/main/default/classes/ --glob "*Test*.cls" -l
 ```
 
----
+Read 2-3 of the discovered test classes to understand:
+- How `@TestSetup` methods are structured
+- Which test data factory/utility classes exist and what methods they provide
+- What bypass/isolation patterns are used (custom settings, static flags, etc.)
+- How HTTP mocks are implemented (inner class vs shared mock)
+- Naming conventions: `*Test.cls`, `*_Test.cls`, `Test*.cls`
 
-## 6. Aura Best Practices (summary)
+### Step 2: Find the right test class for a changed file
 
-> Aura is in maintenance mode. Use LWC for all new development.
+```bash
+# For a class named "MyService", search for its test class
+rg -l "MyService" force-app/main/default/classes/ --glob "*Test*.cls"
 
-- `$A.enqueueAction()` for server calls — never call Apex directly
-- Avoid naming JS controller methods the same as `@AuraEnabled` Apex methods (causes silent infinite loops)
-- `$A.getCallback()` inside async callbacks (setTimeout, Promises)
-- Component Events for parent-child; Application Events sparingly
-- Apply SLDS classes for consistent UI
-- Migrate to LWC when significantly modifying Aura components
-
----
-
-## 7. SOQL / SOSL Best Practices (summary)
-
-For the full reference, see [soql-sosl-best-practices.md](soql-sosl-best-practices.md).
-
-- Use selective filters on **indexed fields** — `Id`, `Name`, `CreatedDate`, lookups, `ExternalId`
-- Always include `WHERE` clause and/or `LIMIT`
-- Never use leading wildcards (`LIKE '%value%'`)
-- Use `WITH USER_MODE` or `WITH SECURITY_ENFORCED` for FLS enforcement
-- Explicitly list fields — never `SELECT *` equivalent
-- Use relationship queries (parent-to-child, child-to-parent) to reduce query count
-- Use `IN` clauses with collections — never SOQL inside loops
-- Use `FOR UPDATE` only when row-locking is truly needed
-- Verify selectivity by running the REST explain endpoint (see section 3)
-
----
-
-## 8. Security Checklist
-
-For the full reference, see [security-best-practices.md](security-best-practices.md).
-
-- [ ] `with sharing` or `inherited sharing` on every class (unless documented exception)
-- [ ] CRUD/FLS enforced on all data operations (`WITH USER_MODE`, `Security.stripInaccessible()`)
-- [ ] No hardcoded credentials, IDs, or org-specific values
-- [ ] Bind variables in SOQL — never string concatenation (SOQL injection)
-- [ ] Named Credentials for all external callouts — never hardcode endpoints/secrets
-- [ ] CSP-compliant third-party libraries (no `eval`, no `Function()` constructors)
-- [ ] Sensitive data not exposed in debug logs or error messages
-- [ ] User input validated on both client (LWC) and server (Apex)
-
----
-
-## 9. Integration & Callout Best Practices
-
-- **Always use Named Credentials** — never hardcode endpoints or credentials in code
-- Use External Credentials for auth protocol reuse across callouts
-- Limits: 100 callouts/transaction, 10s sync timeout, 120s async timeout, 6MB heap
-- **No DML before callouts** — DML locks rows and uncommitted work causes `CalloutException`
-- Use `@future(callout=true)` or `Queueable` for non-blocking callout patterns
-- Use `Continuation` class for long-running callouts from LWC/Visualforce
-- Implement retry logic with exponential backoff for transient failures
-- Use `HttpCalloutMock` / `MultiStaticResourceCalloutMock` in tests
-
----
-
-## 10. Flow Best Practices
-
-- Process Builder and Workflow Rules are EOL (Dec 2025) — use Flow Builder exclusively
-- **Before-save > After-save** — before-save runs ~10x faster and uses zero DML
-- Never place Get/Update/Create elements inside loops — bulkify with collection variables
-- Use one record-triggered Flow per object per timing (before/after)
-- Use Subflows for reusable logic and to stay within per-element limits
-- Screen elements and Wait elements break transaction boundaries (new governor limits)
-- Use the Transform element instead of loop + assignment for object mapping
-- Test Flows with bulk data (200+ records) to verify bulkification
-
----
-
-## 11. Project Structure & Metadata
-
-```
-force-app/
-├── main/default/
-│   ├── classes/          # Apex classes + *.cls-meta.xml
-│   ├── triggers/         # Apex triggers + *.trigger-meta.xml
-│   ├── lwc/              # LWC bundles (js, html, css, *.js-meta.xml)
-│   ├── aura/             # Aura bundles
-│   ├── objects/          # Custom objects & fields
-│   ├── flows/            # Flows
-│   ├── permissionsets/   # Permission sets
-│   ├── layouts/          # Page layouts
-│   ├── pages/            # Visualforce pages
-│   ├── customMetadata/   # Custom Metadata Type records
-│   └── staticresources/  # Static resources
+# Also check by naming convention
+ls force-app/main/default/classes/MyServiceTest.cls 2>/dev/null
+ls force-app/main/default/classes/MyService_Test.cls 2>/dev/null
 ```
 
-- Every component requires a `-meta.xml` with `apiVersion` matching `sfdx-project.json`
-- Read `sfdx-project.json` to determine the correct `sourceApiVersion` before generating meta.xml
-- Apex meta.xml: `<apiVersion>NN.0</apiVersion>` + `<status>Active</status>`
-- LWC meta.xml must have `<isExposed>true</isExposed>` and `<targets>` for placement
+If no test class exists, **create one** following the patterns discovered in Step 1.
+
+### Step 3: Generate smart tests
+
+When writing or updating tests, follow these rules:
+
+**Data setup — reuse what exists:**
+- Search for existing test data factory classes (Step 1) and use their methods
+- If the factory doesn't have a method for the SObject you need, add one to the factory
+- Always use `@TestSetup` for shared data across test methods
+- Replicate the project's bypass/isolation pattern (custom settings, static flags) to
+  avoid validation rule and trigger conflicts during test data creation
+- Never use `seeAllData=true`
+- Never hardcode record IDs — query them or create them
+
+**Test methods — cover all paths:**
+- Positive scenario (happy path with valid data)
+- Negative scenario (invalid input, null, missing required fields)
+- Bulk scenario (200+ records to verify governor limit safety)
+- Permission scenario (`System.runAs()` with a restricted user)
+- For callout classes: use `Test.setMock()` with the project's mock pattern
+- For trigger handlers: test all registered events (before/after insert/update/delete)
+
+**Regression detection — assert on behavior, not just coverage:**
+- Use `System.assertEquals` / `System.assertNotEquals` with descriptive messages
+- Assert on record field values after DML, not just record counts
+- Assert that error messages are correct in negative scenarios
+- Assert that bulk operations produce the same results as single-record operations
+- When modifying existing logic, add a test for the specific change to prevent regression
+
+### Step 4: Run tests after every change
+
+```bash
+# Run the specific test class for the changed file
+sf apex run test --class-names MyServiceTest --result-format human --wait 10
+
+# If test fails, read the output, fix the issue, and re-run
+# Repeat until green
+```
+
+### Step 5: Check coverage
+
+```bash
+# Run with code coverage to check the changed class
+sf apex run test --class-names MyServiceTest --code-coverage --result-format human --wait 10
+```
+
+If coverage is below 85%, identify uncovered lines and add targeted tests.
+
+### Continuous loop during development
+
+Every time you modify an Apex class or trigger:
+1. Find its test class (or create one)
+2. Scan the project's existing test patterns (factory, bypass, mock conventions)
+3. Update/add tests to cover the change
+4. Deploy the class AND its test together
+5. Run the test and verify green
+6. If red: read the failure, fix, re-run — do not leave broken tests
 
 ---
 
-## 12. Pre-Deploy Automation
+## 6. Best Practices Quick Reference
+
+Full details in the reference files — read them when deeper guidance is needed.
+
+| Area | Reference File | Key Rules |
+|------|---------------|-----------|
+| **Apex** | [apex-best-practices.md](apex-best-practices.md) | No SOQL/DML in loops; `with sharing` default; CRUD/FLS enforced; one trigger per object; 85%+ test coverage; Queueable > @future |
+| **LWC** | [lwc-best-practices.md](lwc-best-practices.md) | SLDS base components first; `lwc:if` not `if:true`; `@wire` for reads; cleanup in `disconnectedCallback`; Jest in `__tests__/` |
+| **Aura** | *(maintenance mode)* | Use LWC for new work; `$A.enqueueAction()`; no same-name JS/Apex methods; SLDS classes |
+| **SOQL/SOSL** | [soql-sosl-best-practices.md](soql-sosl-best-practices.md) | Indexed fields in WHERE; no leading wildcards; `WITH USER_MODE`; relationship queries; bind variables |
+| **Security** | [security-best-practices.md](security-best-practices.md) | `with sharing` everywhere; Named Credentials for callouts; no hardcoded IDs/credentials; CSP-compliant JS |
+| **Integration** | *(in security ref)* | Named Credentials mandatory; no DML before callouts; `HttpCalloutMock` in tests; 100 callouts/txn |
+| **Flows** | *(below)* | Before-save > After-save (~10x faster, zero DML); no SOQL/DML in loops; test with 200+ records |
+
+### Governor limits
+
+| Limit | Sync | Async |
+|-------|------|-------|
+| SOQL queries | 100 | 200 |
+| DML statements | 150 | 150 |
+| Records retrieved | 50,000 | 50,000 |
+| CPU time (ms) | 10,000 | 60,000 |
+| Heap size | 6 MB | 12 MB |
+| Callouts | 100 | 100 |
+
+### Metadata rules
+
+- Read `sfdx-project.json` for `sourceApiVersion` before generating any `-meta.xml`
+- Apex meta: `<apiVersion>NN.0</apiVersion>` + `<status>Active</status>`
+- LWC meta: `<isExposed>true</isExposed>` + `<targets>` for placement
+- Flows: Process Builder/Workflow Rules are EOL — use Flow Builder; before-save preferred
+
+---
+
+## 7. Pre-Deploy Automation
 
 Before deploying, **run these checks automatically** (do not ask the user):
 
 1. **Read `sfdx-project.json`** — get `sourceApiVersion` and `packageDirectories`
-2. **Static analysis** — read changed files and verify best practices (section 2)
-3. **Run Apex tests** — `sf apex run test --test-level RunLocalTests --result-format human --wait 10`
-4. **Run LWC Jest tests** — `npm test` (if `__tests__/` directories exist)
-5. **Preview deployment** — `sf project deploy preview --source-dir force-app`
-6. **Validate with tests** — `sf project deploy validate --source-dir force-app --test-level RunLocalTests`
-7. **Deploy** — `sf project deploy start --source-dir force-app` (only after green validation)
-8. **Report** — `sf project deploy report` to confirm and share status with user
+2. **Discover changed files** — use section 2 commands (filesystem timestamps or git diff)
+3. **Static analysis** — read changed files and verify best practices (section 3)
+4. **SOQL explain plans** — extract queries from changed files and verify selectivity (section 4)
+5. **Test generation** — for each changed class, find or create tests following project patterns (section 5)
+6. **Run Apex tests** — `sf apex run test --test-level RunLocalTests --result-format human --wait 10`
+7. **Run LWC Jest tests** — `npm test` (if `__tests__/` directories exist)
+8. **Preview deployment** — `sf project deploy preview --source-dir force-app`
+9. **Validate with tests** — `sf project deploy validate --source-dir force-app --test-level RunLocalTests`
+10. **Deploy** — `sf project deploy start --source-dir force-app` (only after green validation)
+11. **Report** — `sf project deploy report` to confirm and share status with user
 
 If any step fails, read the error, fix it if possible, and retry. Only escalate to the user if you cannot resolve the issue.
 
